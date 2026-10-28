@@ -16,6 +16,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -26,8 +27,10 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -61,7 +64,6 @@ object Prefs {
         sp(c).edit().putString("folders", o.toString()).apply()
     }
 
-    // First run: every app already installed counts as "seen" (not new)
     fun initSeen(c: Context, all: List<String>) {
         if (!sp(c).contains("seen")) sp(c).edit().putStringSet("seen", all.toSet()).apply()
     }
@@ -73,11 +75,11 @@ object Prefs {
         sp(c).edit().putStringSet("seen", s).apply()
     }
 
+    // An app lives in only one folder
     fun move(c: Context, pkg: String, name: String?) {
         val m = folders(c)
         m.values.forEach { it.remove(pkg) }
         if (name != null) { m.getOrPut(name) { mutableListOf() }.add(pkg); markSeen(c, pkg) }
-        m.entries.removeAll { it.value.isEmpty() }
         save(c, m)
     }
 }
@@ -123,7 +125,7 @@ fun cell(c: Context, item: Item, w: Int, click: (Item) -> Unit, long: (Item) -> 
     }
     val name = TextView(c).apply {
         text = item.label; setTextColor(Color.WHITE); textSize = 12f
-        maxLines = 1; gravity = Gravity.CENTER
+        maxLines = 2; ellipsize = TextUtils.TruncateAt.END; gravity = Gravity.CENTER
         setShadowLayer(4f, 0f, 1f, Color.BLACK)
     }
     return LinearLayout(c).apply {
@@ -183,10 +185,12 @@ class MainActivity : Activity() {
     private lateinit var root: FrameLayout
     private var pagerRv: RecyclerView? = null
     private var drawer: View? = null
+    private var curName = "APPS"
     private var sx = 0f
     private var sy = 0f
     private var maxP = 1
-    private var topAtDown = false
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -214,23 +218,28 @@ class MainActivity : Activity() {
         if (drawer != null) closeDrawer()
     }
 
+    private fun refresh() {
+        val was = drawer != null
+        build()
+        if (was) openDrawer(curName)
+    }
+
+    // Home: wallpaper + only newly installed apps
     private fun build() {
         drawer = null
         root.removeAllViews()
         val all = launchables(this)
         Prefs.initSeen(this, all.map { it.pkg!! })
         val seen = Prefs.seenSet(this)
-        val folders = Prefs.folders(this)
-        val inFolder = folders.values.flatten().toSet()
-        val byPkg = all.associateBy { it.pkg }
-        val pages = listOf(Page(null, all.filter { it.pkg !in inFolder && it.pkg !in seen })) +
-            folders.map { (n, l) -> Page(n, l.mapNotNull { byPkg[it] }) }
+        val inFolder = Prefs.folders(this).values.flatten().toSet()
+        val fresh = all.filter { it.pkg !in inFolder && it.pkg !in seen }
         val w = resources.displayMetrics.widthPixels
         root.addView(ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             setImageDrawable(wallpaper(this@MainActivity))
         })
-        val rv = pager(this, pages, 4, w, 140, { launch(this, it.pkg!!) }, { onLong(it) }, { onTitle(it) })
+        val rv = pager(this, listOf(Page(null, fresh)), 4, w, 140,
+            { launch(this, it.pkg!!) }, { onLong(it) }, {})
         pagerRv = rv
         root.addView(rv)
         val gear = TextView(this).apply {
@@ -240,31 +249,101 @@ class MainActivity : Activity() {
         root.addView(gear, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
     }
 
-    private fun openDrawer() {
+    // Drawer: tabs = APPS + folders, menu at top right
+    private fun openDrawer(startAt: String? = null) {
         if (drawer != null) return
-        val w = resources.displayMetrics.widthPixels
         val all = launchables(this)
         val byPkg = all.associateBy { it.pkg }
         val folders = Prefs.folders(this)
-        val inF = folders.values.flatten().toSet()
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        fun sec(title: String?, items: List<Item>) {
-            if (title != null) col.addView(TextView(this).apply {
-                text = title; textSize = 18f; setTextColor(Color.WHITE); setPadding(48, 32, 48, 8)
+        val names = listOf("APPS") + folders.keys
+        val pages = names.map { n ->
+            Page(null, if (n == "APPS") all else folders[n]!!.mapNotNull { byPkg[it] })
+        }
+        val w = resources.displayMetrics.widthPixels
+        val rv = pager(this, pages, 5, w, dp(86), { launch(this, it.pkg!!) }, { onLong(it) }, {})
+
+        val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val hsv = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(bar)
+        }
+        val labels = mutableListOf<TextView>()
+        val marks = mutableListOf<View>()
+
+        fun select(i: Int) {
+            curName = names[i]
+            labels.forEachIndexed { j, t ->
+                t.setTextColor(if (j == i) Color.WHITE else Color.parseColor("#99FFFFFF"))
+            }
+            marks.forEachIndexed { j, m -> m.visibility = if (j == i) View.VISIBLE else View.INVISIBLE }
+            bar.getChildAt(i)?.let { hsv.smoothScrollTo(it.left - dp(40), 0) }
+        }
+
+        names.forEachIndexed { i, n ->
+            val t = TextView(this).apply {
+                text = n.uppercase(); textSize = 15f
+                setPadding(dp(20), dp(12), dp(20), dp(8))
+                setOnClickListener { rv.smoothScrollToPosition(i) }
+                if (i > 0) setOnLongClickListener { renameFolder(n); true }
+            }
+            val m = View(this).apply { setBackgroundColor(Color.WHITE) }
+            labels.add(t); marks.add(m)
+            bar.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(t); addView(m, LinearLayout.LayoutParams(-1, dp(3)))
             })
-            val g = GridLayout(this).apply { columnCount = 4 }
-            items.forEach { g.addView(cell(this, it, w / 4, { a -> launch(this, a.pkg!!) }, { a -> onLong(a) })) }
-            col.addView(g)
         }
-        folders.forEach { (n, l) -> sec(n, l.mapNotNull { byPkg[it] }) }
-        sec(if (folders.isEmpty()) null else "Other apps", all.filter { it.pkg !in inF })
-        val sv = ScrollView(this).apply {
-            setBackgroundColor(Color.parseColor("#EE101018"))
-            setPadding(0, 140, 0, 140); clipToPadding = false
-            addView(col)
+
+        rv.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrollStateChanged(r: RecyclerView, s: Int) {
+                if (s == RecyclerView.SCROLL_STATE_IDLE) {
+                    val p = (r.layoutManager as LinearLayoutManager).findFirstCompletelyVisibleItemPosition()
+                    if (p >= 0) select(p)
+                }
+            }
+        })
+
+        val idx = names.indexOf(startAt ?: "APPS").coerceAtLeast(0)
+        select(idx)
+        rv.post { rv.scrollToPosition(idx) }
+
+        val menu = TextView(this).apply {
+            text = "⋮"; textSize = 26f; setTextColor(Color.WHITE)
+            setPadding(dp(18), dp(6), dp(18), dp(6))
+            setOnClickListener { v ->
+                val pm = PopupMenu(this@MainActivity, v)
+                pm.menu.add(0, 1, 0, "New folder")
+                pm.menu.add(0, 2, 1, "Rename folder")
+                pm.menu.add(0, 3, 2, "Delete folder")
+                pm.menu.add(0, 4, 3, "Settings")
+                pm.setOnMenuItemClickListener { mi ->
+                    when (mi.itemId) {
+                        1 -> newFolder()
+                        2 -> renameFolder(curName)
+                        3 -> deleteFolder(curName)
+                        else -> startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
+                    }
+                    true
+                }
+                pm.show()
+            }
         }
-        drawer = sv
-        root.addView(sv)
+
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.parseColor("#F2101018"))
+            setPadding(0, dp(30), 0, 0)
+            addView(hsv, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(menu)
+        }
+        val frame = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#E6101018"))
+            addView(rv)
+            addView(top, FrameLayout.LayoutParams(-1, -2))
+        }
+        drawer = frame
+        root.addView(frame)
     }
 
     private fun closeDrawer() {
@@ -278,25 +357,41 @@ class MainActivity : Activity() {
         else if (dir == "up" && f == 1) openDrawer()
     }
 
-    private fun onTitle(name: String) {
-        AlertDialog.Builder(this).setTitle(name)
-            .setItems(arrayOf("Rename", "Delete folder")) { _, w ->
+    private fun newFolder() {
+        val et = EditText(this)
+        AlertDialog.Builder(this).setTitle("Folder name").setView(et)
+            .setPositiveButton("OK") { _, _ ->
+                val n = et.text.toString().trim()
                 val m = Prefs.folders(this)
-                if (w == 1) {
-                    m.remove(name); Prefs.save(this, m); build()
-                } else {
-                    val et = EditText(this).apply { setText(name) }
-                    AlertDialog.Builder(this).setTitle("New name").setView(et)
-                        .setPositiveButton("OK") { _, _ ->
-                            val n = et.text.toString().trim()
-                            if (n.isNotEmpty() && n != name) {
-                                val r = LinkedHashMap<String, List<String>>()
-                                m.forEach { (k, v) -> r[if (k == name) n else k] = v }
-                                Prefs.save(this, r); build()
-                            }
-                        }.show()
+                if (n.isNotEmpty() && n != "APPS" && !m.containsKey(n)) {
+                    m[n] = mutableListOf(); Prefs.save(this, m); curName = n; refresh()
                 }
             }.show()
+    }
+
+    private fun renameFolder(name: String) {
+        if (name == "APPS") {
+            Toast.makeText(this, "Open a folder tab first", Toast.LENGTH_SHORT).show(); return
+        }
+        val et = EditText(this).apply { setText(name) }
+        AlertDialog.Builder(this).setTitle("Rename folder").setView(et)
+            .setPositiveButton("OK") { _, _ ->
+                val n = et.text.toString().trim()
+                val m = Prefs.folders(this)
+                if (n.isNotEmpty() && n != name && n != "APPS" && !m.containsKey(n)) {
+                    val r = LinkedHashMap<String, List<String>>()
+                    m.forEach { (k, v) -> r[if (k == name) n else k] = v }
+                    Prefs.save(this, r); curName = n; refresh()
+                }
+            }.show()
+    }
+
+    private fun deleteFolder(name: String) {
+        if (name == "APPS") {
+            Toast.makeText(this, "Open a folder tab first", Toast.LENGTH_SHORT).show(); return
+        }
+        val m = Prefs.folders(this)
+        m.remove(name); Prefs.save(this, m); curName = "APPS"; refresh()
     }
 
     private fun onLong(i: Item) {
@@ -316,13 +411,15 @@ class MainActivity : Activity() {
                         AlertDialog.Builder(this).setTitle("Folder name").setView(et)
                             .setPositiveButton("OK") { _, _ ->
                                 val n = et.text.toString().trim()
-                                if (n.isNotEmpty()) { Prefs.move(this, p, n); build() }
+                                if (n.isNotEmpty() && n != "APPS") {
+                                    Prefs.move(this, p, n); curName = n; refresh()
+                                }
                             }.show()
                     }
-                    w <= names.size -> { Prefs.move(this, p, names[w - 1]); build() }
+                    w <= names.size -> { Prefs.move(this, p, names[w - 1]); refresh() }
                     else -> {
                         if (cur != null) Prefs.move(this, p, null) else Prefs.markSeen(this, p)
-                        build()
+                        refresh()
                     }
                 }
             }.show()
@@ -330,10 +427,7 @@ class MainActivity : Activity() {
 
     override fun dispatchTouchEvent(e: MotionEvent): Boolean {
         when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                sx = e.rawX; sy = e.rawY; maxP = 1
-                topAtDown = ((drawer as? ScrollView)?.scrollY ?: 0) == 0
-            }
+            MotionEvent.ACTION_DOWN -> { sx = e.rawX; sy = e.rawY; maxP = 1 }
             MotionEvent.ACTION_POINTER_DOWN -> maxP = maxOf(maxP, e.pointerCount)
             MotionEvent.ACTION_UP -> {
                 val dm = resources.displayMetrics
@@ -342,7 +436,7 @@ class MainActivity : Activity() {
                 if (Math.abs(dy) > 100 * dm.density && Math.abs(dy) > 1.5f * Math.abs(dx)) {
                     val f = if (maxP > 1) 2 else 1
                     if (drawer != null) {
-                        if (dy > 0 && topAtDown) closeDrawer()
+                        if (dy > 0 && sy < dm.heightPixels * 0.15) closeDrawer()
                     } else if (dy < 0 && sy > dm.heightPixels * 0.85) {
                         gesture("up", f)
                     } else if (dy > 0 && sy < dm.heightPixels * 0.15) {

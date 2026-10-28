@@ -230,6 +230,10 @@ class MainActivity : Activity() {
     private var maxP = 1
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+        override fun onWindowFocusChanged(f: Boolean) {
+        super.onWindowFocusChanged(f)
+        if (f) goFull(this)
+        }
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)

@@ -230,10 +230,11 @@ class MainActivity : Activity() {
     private var maxP = 1
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-        override fun onWindowFocusChanged(f: Boolean) {
+
+    override fun onWindowFocusChanged(f: Boolean) {
         super.onWindowFocusChanged(f)
         if (f) goFull(this)
-        }
+    }
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -381,10 +382,11 @@ class MainActivity : Activity() {
 
         names.forEachIndexed { i, n ->
             val t = TextView(this).apply {
-                text = n.uppercase(); textSize = 15f
+                text = (if (n == "APPS") Prefs.sp(this@MainActivity).getString("appsname", "APPS")!! else n).uppercase()
+                textSize = 15f
                 setPadding(dp(20), dp(12), dp(20), dp(8))
                 setOnClickListener { rv.smoothScrollToPosition(i) }
-                if (i > 0) setOnLongClickListener { renameFolder(n); true }
+                setOnLongClickListener { renameFolder(n); true }
             }
             val m = View(this).apply { setBackgroundColor(Color.WHITE) }
             labels.add(t); marks.add(m)
@@ -500,7 +502,16 @@ class MainActivity : Activity() {
 
     private fun renameFolder(name: String) {
         if (name == "APPS") {
-            Toast.makeText(this, "Open a folder tab first", Toast.LENGTH_SHORT).show(); return
+            val cur = Prefs.sp(this).getString("appsname", "APPS")
+            val e2 = EditText(this).apply { setText(cur) }
+            AlertDialog.Builder(this).setTitle("Rename").setView(e2)
+                .setPositiveButton("OK") { _, _ ->
+                    val t = e2.text.toString().trim()
+                    if (t.isNotEmpty()) {
+                        Prefs.sp(this).edit().putString("appsname", t).apply(); refresh()
+                    }
+                }.show()
+            return
         }
         val et = EditText(this).apply { setText(name) }
         AlertDialog.Builder(this).setTitle("Rename folder").setView(et)

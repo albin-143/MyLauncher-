@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="svc_desc">Edge gestures: swipe in from the left or right edge for Back, swipe up from the bottom for Home, hold at the bottom for Recents.</string>
+</resources>

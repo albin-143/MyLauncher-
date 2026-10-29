@@ -6,7 +6,6 @@ import android.app.AlertDialog
 import android.app.WallpaperManager
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -20,6 +19,7 @@ import android.provider.Settings
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -124,28 +124,11 @@ fun wallpaper(c: Context): Drawable {
     )
 }
 
-fun saveWall(a: Activity, uri: Uri) {wallEditor(a, uri)
-    if (uri != Uri.EMPTY) return
-    try {
-        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        a.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }
-        var s = 1
-        while (o.outWidth / (s * 2) >= 1440) s *= 2
-        val o2 = BitmapFactory.Options().apply { inSampleSize = s }
-        val bmp = a.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o2) }
-        if (bmp != null) {
-            java.io.File(a.filesDir, "wall.jpg").outputStream().use {
-                bmp.compress(Bitmap.CompressFormat.JPEG, 90, it)
-            }
-            Toast.makeText(a, "Wallpaper set", Toast.LENGTH_SHORT).show()
-        }
-    } catch (e: Exception) {
-        Toast.makeText(a, "Failed", Toast.LENGTH_SHORT).show()
-    }
-}
+fun saveWall(a: Activity, uri: Uri) = wallEditor(a, uri)
 
 fun cell(
-    c: Context, item: Item, w: Int, click: (Item) -> Unit, long: (Item) -> Unit, selected: Boolean
+    c: Context, item: Item, w: Int, click: (Item) -> Unit, long: (Item) -> Unit,
+    selected: Boolean, rowH: Int = 0
 ): View {
     val d = c.resources.displayMetrics.density
     val gap = (Prefs.gi(c, "gap", 10) * d).toInt()
@@ -155,7 +138,10 @@ fun cell(
         gravity = Gravity.CENTER
         setPadding(0, gap, 0, gap)
         if (selected) setBackgroundColor(Color.parseColor("#55FFFFFF"))
-        layoutParams = GridLayout.LayoutParams().apply { width = w }
+        layoutParams = GridLayout.LayoutParams().apply {
+            width = w
+            if (rowH > 0) height = rowH
+        }
         setOnClickListener { click(item) }
         setOnLongClickListener { long(item); true }
     }
@@ -185,8 +171,9 @@ class PageVH(sv: ScrollView, val g: GridLayout) : RecyclerView.ViewHolder(sv)
 fun pager(
     c: Context, pages: List<Page>, cols: Int, wPx: Int, topPad: Int,
     click: (Item) -> Unit, long: (Item) -> Unit, isSel: (Item) -> Boolean,
-    bgLong: (() -> Unit)? = null
+    bgLong: (() -> Unit)? = null, rows: Int = 0
 ): RecyclerView {
+    val rowH = if (rows > 0) (c.resources.displayMetrics.heightPixels - topPad - 100) / rows else 0
     val rv = RecyclerView(c)
     rv.layoutManager = LinearLayoutManager(c, RecyclerView.HORIZONTAL, false)
     PagerSnapHelper().attachToRecyclerView(rv)
@@ -209,7 +196,9 @@ fun pager(
 
         override fun onBindViewHolder(h: PageVH, i: Int) {
             h.g.removeAllViews()
-            pages[i].items.forEach { h.g.addView(cell(c, it, wPx / cols, click, long, isSel(it))) }
+            pages[i].items.forEach {
+                h.g.addView(cell(c, it, wPx / cols, click, long, isSel(it), rowH))
+            }
         }
 
         override fun getItemCount() = pages.size
@@ -229,6 +218,20 @@ class MainActivity : Activity() {
     private var sx = 0f
     private var sy = 0f
     private var maxP = 1
+    private var pinch = 1f
+
+    private val sd by lazy {
+        ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(d: ScaleGestureDetector): Boolean { pinch = 1f; return true }
+            override fun onScale(d: ScaleGestureDetector): Boolean { pinch *= d.scaleFactor; return true }
+            override fun onScaleEnd(d: ScaleGestureDetector) {
+                if (drawer == null) {
+                    if (pinch < 0.75f) gesture("pin", 1)
+                    else if (pinch > 1.3f) gesture("pout", 1)
+                }
+            }
+        })
+    }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -267,7 +270,7 @@ class MainActivity : Activity() {
     override fun onActivityResult(req: Int, res: Int, data: Intent?) {
         super.onActivityResult(req, res, data)
         val u = data?.data
-        if (req == 7 && res == RESULT_OK && u != null) { saveWall(this, u); build() }
+        if (req == 7 && res == RESULT_OK && u != null) saveWall(this, u)
     }
 
     private fun refresh() {
@@ -358,10 +361,12 @@ class MainActivity : Activity() {
         }
         val w = resources.displayMetrics.widthPixels
         val dc = Prefs.gi(this, "dcols", 5)
+        val dr = Prefs.gi(this, "drows", 0)
         val rv = pager(this, pages, dc, w, dp(86),
             { if (sel.isNotEmpty()) toggle(it) else launch(this, it.pkg!!) },
             { toggle(it) },
-            { sel.contains(it.pkg!!) })
+            { sel.contains(it.pkg!!) },
+            rows = dr)
         drawerRv = rv
 
         val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -566,6 +571,7 @@ class MainActivity : Activity() {
     }
 
     override fun dispatchTouchEvent(e: MotionEvent): Boolean {
+        sd.onTouchEvent(e)
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> { sx = e.rawX; sy = e.rawY; maxP = 1 }
             MotionEvent.ACTION_POINTER_DOWN -> maxP = maxOf(maxP, e.pointerCount)
@@ -595,7 +601,9 @@ class SettingsActivity : Activity() {
         "up1" to "1 finger: swipe up from bottom",
         "down1" to "1 finger: swipe down from top",
         "up2" to "2 fingers: swipe up from bottom",
-        "down2" to "2 fingers: swipe down from top"
+        "down2" to "2 fingers: swipe down from top",
+        "pin1" to "Pinch in (two fingers close)",
+        "pout1" to "Pinch out (two fingers apart)"
     )
 
     override fun onResume() { super.onResume(); show() }
@@ -680,7 +688,11 @@ class SettingsActivity : Activity() {
             }
             "drawer" -> {
                 head("LAYOUT")
-                choice("Drawer columns", "dcols", arrayOf("4", "5", "6"), intArrayOf(4, 5, 6), 5)
+                choice("Drawer columns", "dcols",
+                    arrayOf("3", "4", "5", "6", "7", "8"), intArrayOf(3, 4, 5, 6, 7, 8), 5)
+                choice("Drawer rows", "drows",
+                    arrayOf("Auto (scroll)", "3", "4", "5", "6", "7", "8", "9", "10"),
+                    intArrayOf(0, 3, 4, 5, 6, 7, 8, 9, 10), 0)
                 head("OTHER")
                 choice("Background transparency", "dalpha",
                     arrayOf("Solid", "Slight", "Medium", "High"), intArrayOf(255, 230, 179, 128), 230)
@@ -712,7 +724,7 @@ class SettingsActivity : Activity() {
             "gest" -> {
                 head("EDGE GESTURES")
                 row("Enable edge gestures",
-                    "Left/right edge = Back, bottom up = Home, bottom hold = Recents") {
+                    "Left/right edge = Back, bottom up = Home, bottom up + hold = Recents") {
                     startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                 }
                 head("HOME GESTURES")
@@ -751,13 +763,16 @@ class GestureService : AccessibilityService() {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         var x0 = 0f
         var y0 = 0f
+        var ax = 0f
+        var ay = 0f
         var done = false
+        var armed = false
         val hold = Runnable { done = true; performGlobalAction(GLOBAL_ACTION_RECENTS) }
         val v = View(this)
         v.setOnTouchListener { _, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    x0 = e.rawX; y0 = e.rawY; done = false
+                    x0 = e.rawX; y0 = e.rawY; done = false; armed = false
                     if (kind == 2) h.postDelayed(hold, 600)
                 }
                 MotionEvent.ACTION_MOVE -> if (!done) {
@@ -767,16 +782,28 @@ class GestureService : AccessibilityService() {
                         0 -> if (dx > 60 * d) { done = true; performGlobalAction(GLOBAL_ACTION_BACK) }
                         1 -> if (-dx > 60 * d) { done = true; performGlobalAction(GLOBAL_ACTION_BACK) }
                         else -> {
-                            if (Math.abs(dy) > 20 * d) h.removeCallbacks(hold)
-                            if (-dy > 80 * d) {
-                                done = true; h.removeCallbacks(hold)
-                                val f = Bus.onUp
-                                if (f != null) f() else performGlobalAction(GLOBAL_ACTION_HOME)
+                            if (!armed) {
+                                if (Math.abs(dy) > 20 * d) h.removeCallbacks(hold)
+                                if (-dy > 80 * d) {
+                                    armed = true; ax = e.rawX; ay = e.rawY
+                                    h.postDelayed(hold, 450)
+                                }
+                            } else if (Math.abs(e.rawX - ax) > 12 * d || Math.abs(e.rawY - ay) > 12 * d) {
+                                ax = e.rawX; ay = e.rawY
+                                h.removeCallbacks(hold); h.postDelayed(hold, 450)
                             }
                         }
                     }
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> h.removeCallbacks(hold)
+                MotionEvent.ACTION_UP -> {
+                    h.removeCallbacks(hold)
+                    if (kind == 2 && armed && !done) {
+                        done = true
+                        val f = Bus.onUp
+                        if (f != null) f() else performGlobalAction(GLOBAL_ACTION_HOME)
+                    }
+                }
+                MotionEvent.ACTION_CANCEL -> h.removeCallbacks(hold)
             }
             true
         }

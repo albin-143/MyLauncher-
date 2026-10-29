@@ -124,7 +124,8 @@ fun wallpaper(c: Context): Drawable {
     )
 }
 
-fun saveWall(a: Activity, uri: Uri) {
+fun saveWall(a: Activity, uri: Uri) {wallEditor(a, uri)
+    if (uri != Uri.EMPTY) return
     try {
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         a.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }
